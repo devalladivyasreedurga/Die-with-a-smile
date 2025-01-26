@@ -4,102 +4,114 @@ import Peer from "simple-peer";
 import { v4 as uuidV4 } from "uuid";
 
 const socket = io("https://die-with-a-smile-production.up.railway.app");
-
 const VideoChat = () => {
   const [roomId, setRoomId] = useState("");
   const [joined, setJoined] = useState(false);
   const myVideo = useRef();
   const userVideo = useRef();
-  const peerRef = useRef();
+  const peers = useRef({}); // Store peers by userId
+  const streamRef = useRef();
 
   useEffect(() => {
     if (joined) {
-      socket.emit("join-room", roomId, socket.id);
-      
-      navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+      // Request access to user media
+      navigator.mediaDevices
+        .getUserMedia({ video: true, audio: true })
         .then((stream) => {
           myVideo.current.srcObject = stream;
+          streamRef.current = stream;
 
+          // Join the room
+          socket.emit("join-room", roomId, socket.id);
+
+          // Handle user connections
           socket.on("user-connected", (userId) => {
             console.log("User connected:", userId);
-            startPeerConnection(true, stream);
+            const peer = createPeer(userId, socket.id, stream);
+            peers.current[userId] = peer;
           });
 
-          socket.on("offer", (offer) => {
-            console.log("Received offer:", offer);
-            startPeerConnection(false, stream, offer);
+          // Handle incoming offer
+          socket.on("offer", (offer, senderId) => {
+            console.log("Received offer from:", senderId);
+            const peer = addPeer(offer, senderId, stream);
+            peers.current[senderId] = peer;
           });
 
-          socket.on("answer", (answer) => {
-            console.log("Received answer:", answer);
-            if (peerRef.current) {
-              peerRef.current.signal(answer);
+          // Handle incoming answer
+          socket.on("answer", (answer, senderId) => {
+            console.log("Received answer from:", senderId);
+            if (peers.current[senderId]) {
+              peers.current[senderId].signal(answer);
             }
           });
 
-          socket.on("ice-candidate", (candidate) => {
-            console.log("Received ICE candidate:", candidate);
-            if (peerRef.current) {
-              peerRef.current.addIceCandidate(new RTCIceCandidate(candidate))
-                .catch(err => console.error("Error adding ICE candidate:", err));
-            } else {
-              console.error("Peer reference is missing when receiving ICE candidate.");
+          // Handle incoming ICE candidate
+          socket.on("ice-candidate", (candidate, senderId) => {
+            console.log("Received ICE candidate from:", senderId);
+            if (peers.current[senderId]) {
+              peers.current[senderId].signal(candidate);
             }
           });
 
-          socket.on("user-disconnected", () => {
-            if (peerRef.current) {
-              peerRef.current.destroy();
+          // Handle user disconnection
+          socket.on("user-disconnected", (userId) => {
+            console.log("User disconnected:", userId);
+            if (peers.current[userId]) {
+              peers.current[userId].destroy();
+              delete peers.current[userId];
             }
           });
         })
-        .catch(error => console.error("Error accessing media devices:", error));
+        .catch((error) => console.error("Error accessing media devices:", error));
     }
   }, [joined, roomId]);
 
-  const startPeerConnection = (initiator, stream, offer = null) => {
+  const createPeer = (userToSignal, callerId, stream) => {
     const peer = new Peer({
-      initiator: initiator,
+      initiator: true,
       trickle: false,
-      stream: stream,
+      stream,
       config: {
         iceServers: [
           { urls: "stun:stun.l.google.com:19302" },
-          { urls: "stun:stun1.l.google.com:19302" },
-          { urls: "stun:stun2.l.google.com:19302" },
           { 
-            urls: "turn:relay1.expressturn.com:3478",
-            username: "efJBE34Dfd",
-            credential: "7sdw9knsd2"
-          }
-        ]
-      }
+            urls: "turn:your-turn-server.com", 
+            username: "your-username", 
+            credential: "your-credential" 
+          },
+        ],
+      },
     });
 
-    peer.on("signal", (data) => {
-      console.log("Sending WebRTC Signal:", data);
-      if (initiator) {
-        socket.emit("offer", data, roomId);
-      } else {
-        socket.emit("answer", data, roomId);
-      }
+    peer.on("signal", (signal) => {
+      socket.emit("offer", signal, userToSignal);
     });
 
-    peer.on("stream", (userStream) => {
-      console.log("Receiving remote stream:", userStream);
-      userVideo.current.srcObject = userStream;
+    peer.on("stream", (remoteStream) => {
+      userVideo.current.srcObject = remoteStream;
     });
 
-    peer.on("ice-candidate", (candidate) => {
-      console.log("Sending ICE Candidate:", candidate);
-      socket.emit("ice-candidate", candidate, roomId);
+    return peer;
+  };
+
+  const addPeer = (incomingSignal, callerId, stream) => {
+    const peer = new Peer({
+      initiator: false,
+      trickle: false,
+      stream,
     });
 
-    if (offer) {
-      peer.signal(offer);
-    }
+    peer.on("signal", (signal) => {
+      socket.emit("answer", signal, callerId);
+    });
 
-    peerRef.current = peer;
+    peer.on("stream", (remoteStream) => {
+      userVideo.current.srcObject = remoteStream;
+    });
+
+    peer.signal(incomingSignal);
+    return peer;
   };
 
   const createRoom = () => {
@@ -110,7 +122,6 @@ const VideoChat = () => {
 
   const joinRoom = () => {
     setJoined(true);
-    socket.emit("join-room", roomId, socket.id);
   };
 
   return (
